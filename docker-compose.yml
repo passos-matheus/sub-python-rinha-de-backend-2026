@@ -1,6 +1,6 @@
 services:
   api1: &api
-    build: .
+    image: passosmatheus/sub-teste-rinha-2026:v1
     deploy:
       resources:
         limits:
