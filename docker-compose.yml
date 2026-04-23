@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: passosmatheus/sub-teste-rinha-2026:v1
+    image: passosmatheus/sub-teste-rinha-2026:go
     deploy:
       resources:
         limits:
