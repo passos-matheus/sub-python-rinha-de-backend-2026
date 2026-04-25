@@ -13,7 +13,7 @@ LABELS_PATH = BASE_DIR / 'labels.bin'
 VDIM = 14
 VDIM_PADDED = 16
 N_REFS = 100000
-SCALE = 127
+SCALE = 8192
 
 
 def load_dataset(path):
@@ -25,7 +25,7 @@ def load_dataset(path):
 
 
 def quantize(X):
-    out = np.zeros((len(X), VDIM_PADDED), dtype=np.int8)
+    out = np.zeros((len(X), VDIM_PADDED), dtype=np.int16)
     for j in range(VDIM):
         col = X[:, j].astype(np.float32)
         clipped = np.clip(col, 0.0, 1.0)
@@ -33,7 +33,7 @@ def quantize(X):
         q = np.minimum(q, SCALE)
         if j in (5, 6):
             q = np.where(col < 0, -SCALE, q)
-        out[:, j] = q.astype(np.int8)
+        out[:, j] = q.astype(np.int16)
     return out
 
 

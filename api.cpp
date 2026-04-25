@@ -34,10 +34,10 @@ constexpr int  RBUF_SIZE  = 8192;
 constexpr int  LISTEN_BACKLOG = 4096;
 
 
-constexpr int8_t Q_SCALE    = 127;
-constexpr int8_t Q_SENTINEL = -127;
+constexpr int16_t Q_SCALE    = 8192;
+constexpr int16_t Q_SENTINEL = -8192;
 
-static const int8_t*  g_refs   = nullptr;
+static const int16_t* g_refs   = nullptr;
 static const uint8_t* g_labels = nullptr;
 
 
@@ -205,15 +205,15 @@ static bool array_contains(const char* p, const char* end, const char* needle, s
 }
 
 
-static inline int8_t quant(float v) {
+static inline int16_t quant(float v) {
     if (v < 0.0f) return 0;
     if (v > 1.0f) return Q_SCALE;
     int q = (int)(v * (float)Q_SCALE + 0.5f);
     if (q > Q_SCALE) q = Q_SCALE;
-    return (int8_t)q;
+    return (int16_t)q;
 }
 
-static bool vectorize(const char* buf, size_t len, int8_t* out) {
+static bool vectorize(const char* buf, size_t len, int16_t* out) {
     const char* tx_p   = find_section(buf, len, "\"transaction\"",      13);
     const char* cust_p = find_section(buf, len, "\"customer\"",         10);
     const char* mer_p  = find_section(buf, len, "\"merchant\"",         10);
@@ -350,7 +350,7 @@ static bool vectorize(const char* buf, size_t len, int8_t* out) {
 }
 
 
-static inline void top_insert(int32_t* td, uint32_t* ti, int32_t d, uint32_t i) {
+static inline void top_insert(uint32_t* td, uint32_t* ti, uint32_t d, uint32_t i) {
     int j = KNN_K - 1;
     while (j > 0 && td[j - 1] > d) {
         td[j] = td[j - 1];
@@ -362,22 +362,19 @@ static inline void top_insert(int32_t* td, uint32_t* ti, int32_t d, uint32_t i) 
 }
 
 __attribute__((target("avx2")))
-static int knn_avx2(const int8_t* vec) {
-    const __m128i q8 = _mm_loadu_si128((const __m128i*)vec);
-    const __m256i q  = _mm256_cvtepi8_epi16(q8);
+static int knn_avx2(const int16_t* vec) {
+    const __m256i q = _mm256_loadu_si256((const __m256i*)vec);
 
-    int32_t  td[KNN_K];
+    uint32_t td[KNN_K];
     uint32_t ti[KNN_K];
-    for (int i = 0; i < KNN_K; i++) { td[i] = INT32_MAX; ti[i] = 0; }
-    int32_t threshold = INT32_MAX;
+    for (int i = 0; i < KNN_K; i++) { td[i] = UINT32_MAX; ti[i] = 0; }
+    uint32_t threshold = UINT32_MAX;
 
     for (size_t i = 0; i < N_REFS; i += 2) {
         if (i + 16 < N_REFS) _mm_prefetch((const char*)(g_refs + (i + 16) * VDIM_PADDED), _MM_HINT_T0);
 
-        __m128i r0_8 = _mm_load_si128((const __m128i*)(g_refs + (i + 0) * VDIM_PADDED));
-        __m128i r1_8 = _mm_load_si128((const __m128i*)(g_refs + (i + 1) * VDIM_PADDED));
-        __m256i r0 = _mm256_cvtepi8_epi16(r0_8);
-        __m256i r1 = _mm256_cvtepi8_epi16(r1_8);
+        __m256i r0 = _mm256_load_si256((const __m256i*)(g_refs + (i + 0) * VDIM_PADDED));
+        __m256i r1 = _mm256_load_si256((const __m256i*)(g_refs + (i + 1) * VDIM_PADDED));
         __m256i d0 = _mm256_sub_epi16(q, r0);
         __m256i d1 = _mm256_sub_epi16(q, r1);
         __m256i sq0 = _mm256_madd_epi16(d0, d0);
@@ -386,12 +383,12 @@ static int knn_avx2(const int8_t* vec) {
         __m128i s0 = _mm_add_epi32(_mm256_castsi256_si128(sq0), _mm256_extracti128_si256(sq0, 1));
         s0 = _mm_add_epi32(s0, _mm_srli_si128(s0, 8));
         s0 = _mm_add_epi32(s0, _mm_srli_si128(s0, 4));
-        int32_t dist0 = _mm_cvtsi128_si32(s0);
+        uint32_t dist0 = (uint32_t)_mm_cvtsi128_si32(s0);
 
         __m128i s1 = _mm_add_epi32(_mm256_castsi256_si128(sq1), _mm256_extracti128_si256(sq1, 1));
         s1 = _mm_add_epi32(s1, _mm_srli_si128(s1, 8));
         s1 = _mm_add_epi32(s1, _mm_srli_si128(s1, 4));
-        int32_t dist1 = _mm_cvtsi128_si32(s1);
+        uint32_t dist1 = (uint32_t)_mm_cvtsi128_si32(s1);
 
         if (dist0 < threshold) {
             top_insert(td, ti, dist0, (uint32_t)(i + 0));
@@ -406,18 +403,18 @@ static int knn_avx2(const int8_t* vec) {
     return g_labels[ti[0]] + g_labels[ti[1]] + g_labels[ti[2]] + g_labels[ti[3]] + g_labels[ti[4]];
 }
 
-static int knn_scalar(const int8_t* vec) {
-    int32_t  td[KNN_K];
+static int knn_scalar(const int16_t* vec) {
+    uint32_t td[KNN_K];
     uint32_t ti[KNN_K];
-    for (int i = 0; i < KNN_K; i++) { td[i] = INT32_MAX; ti[i] = 0; }
-    int32_t threshold = INT32_MAX;
+    for (int i = 0; i < KNN_K; i++) { td[i] = UINT32_MAX; ti[i] = 0; }
+    uint32_t threshold = UINT32_MAX;
 
     for (size_t i = 0; i < N_REFS; i++) {
-        const int8_t* r = g_refs + i * VDIM_PADDED;
-        int32_t d = 0;
+        const int16_t* r = g_refs + i * VDIM_PADDED;
+        uint32_t d = 0;
         for (int k = 0; k < VDIM; k++) {
             int32_t diff = (int32_t)vec[k] - (int32_t)r[k];
-            d += diff * diff;
+            d += (uint32_t)(diff * diff);
         }
         if (d < threshold) {
             top_insert(td, ti, d, (uint32_t)i);
@@ -428,7 +425,7 @@ static int knn_scalar(const int8_t* vec) {
     return g_labels[ti[0]] + g_labels[ti[1]] + g_labels[ti[2]] + g_labels[ti[3]] + g_labels[ti[4]];
 }
 
-typedef int (*knn_fn)(const int8_t*);
+typedef int (*knn_fn)(const int16_t*);
 static knn_fn g_knn = nullptr;
 
 
@@ -565,7 +562,7 @@ static int try_process_one(Conn* c) {
         if (body_end > RBUF_SIZE) return -1;
         if (c->rp < body_end) return 0;
 
-        alignas(16) int8_t vec[VDIM_PADDED];
+        alignas(32) int16_t vec[VDIM_PADDED];
         const Resp* resp;
         if (!vectorize(c->rb + headers_end, content_len, vec)) {
             resp = &g_resp_400;
@@ -705,7 +702,7 @@ int main() {
     if (!refs_path)   refs_path   = DEFAULT_REFS_PATH;
     if (!labels_path) labels_path = DEFAULT_LABELS_PATH;
 
-    g_refs   = (const int8_t*) mmap_file(refs_path,   N_REFS * VDIM_PADDED);
+    g_refs   = (const int16_t*)mmap_file(refs_path,   N_REFS * VDIM_PADDED * sizeof(int16_t));
     g_labels = (const uint8_t*)mmap_file(labels_path, N_REFS);
 
     __builtin_cpu_init();
