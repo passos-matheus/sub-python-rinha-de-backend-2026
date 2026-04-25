@@ -1,11 +1,11 @@
 services:
   api1: &api
-    image: passosmatheus/sub-teste-rinha-2026:c
+    image: passosmatheus/sub-rinha-2026:rf
     deploy:
       resources:
         limits:
-          cpus: "0.35"
-          memory: "140M"
+          cpus: "0.4"
+          memory: "100M"
 
   api2:
     <<: *api
@@ -23,4 +23,4 @@ services:
       resources:
         limits:
           cpus: "0.2"
-          memory: "20M"
+          memory: "100M"
