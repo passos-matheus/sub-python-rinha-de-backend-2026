@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: passosmatheus/sub-rinha-2026:rf
+    image: passosmatheus/sub-rinha-2026:knn
     deploy:
       resources:
         limits:
