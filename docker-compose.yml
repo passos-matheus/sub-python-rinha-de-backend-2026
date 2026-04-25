@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: passosmatheus/sub-rinha-2026:knn-unix
+    image: passosmatheus/sub-rinha-2026:knn-epoll
     environment:
       SOCKET_PATH: /sockets/api1.sock
     volumes:
@@ -17,7 +17,7 @@ services:
       SOCKET_PATH: /sockets/api2.sock
 
   nginx:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
     ports:
       - "9999:9999"
     volumes:
@@ -34,4 +34,7 @@ services:
 
 volumes:
   sockets:
-
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=4m,mode=0777"
