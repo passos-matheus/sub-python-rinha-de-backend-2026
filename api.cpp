@@ -34,7 +34,10 @@ constexpr int  RBUF_SIZE  = 8192;
 constexpr int  LISTEN_BACKLOG = 4096;
 
 
-static const float*   g_refs   = nullptr;
+constexpr int8_t Q_SCALE    = 127;
+constexpr int8_t Q_SENTINEL = -127;
+
+static const int8_t*  g_refs   = nullptr;
 static const uint8_t* g_labels = nullptr;
 
 
@@ -202,7 +205,15 @@ static bool array_contains(const char* p, const char* end, const char* needle, s
 }
 
 
-static bool vectorize(const char* buf, size_t len, float* out) {
+static inline int8_t quant(float v) {
+    if (v < 0.0f) return 0;
+    if (v > 1.0f) return Q_SCALE;
+    int q = (int)(v * (float)Q_SCALE + 0.5f);
+    if (q > Q_SCALE) q = Q_SCALE;
+    return (int8_t)q;
+}
+
+static bool vectorize(const char* buf, size_t len, int8_t* out) {
     const char* tx_p   = find_section(buf, len, "\"transaction\"",      13);
     const char* cust_p = find_section(buf, len, "\"customer\"",         10);
     const char* mer_p  = find_section(buf, len, "\"merchant\"",         10);
@@ -303,114 +314,121 @@ static bool vectorize(const char* buf, size_t len, float* out) {
         }
     }
 
-    out[0] = clamp01(amount / 10000.0f);
-    out[1] = clamp01((float)installments / 12.0f);
-    out[2] = cust_avg > 0.0f ? clamp01((amount / cust_avg) / 10.0f) : 0.0f;
-    out[3] = (float)req_ts.h / 23.0f;
-    out[4] = (float)day_of_week(req_ts.y, req_ts.mo, req_ts.d) / 6.0f;
+    float fv[VDIM];
+    fv[0] = clamp01(amount / 10000.0f);
+    fv[1] = clamp01((float)installments / 12.0f);
+    fv[2] = cust_avg > 0.0f ? clamp01((amount / cust_avg) / 10.0f) : 0.0f;
+    fv[3] = (float)req_ts.h / 23.0f;
+    fv[4] = (float)day_of_week(req_ts.y, req_ts.mo, req_ts.d) / 6.0f;
     if (has_last) {
-        out[5] = clamp01((float)last_minutes / 1440.0f);
-        out[6] = clamp01(last_km / 1000.0f);
+        fv[5] = clamp01((float)last_minutes / 1440.0f);
+        fv[6] = clamp01(last_km / 1000.0f);
     } else {
-        out[5] = -1.0f;
-        out[6] = -1.0f;
+        fv[5] = -1.0f;
+        fv[6] = -1.0f;
     }
-    out[7]  = clamp01(km_home / 1000.0f);
-    out[8]  = clamp01((float)tx_count_24h / 20.0f);
-    out[9]  = is_online ? 1.0f : 0.0f;
-    out[10] = card_present ? 1.0f : 0.0f;
-    out[11] = known ? 0.0f : 1.0f;
-    out[12] = mcc_risk(mcc);
-    out[13] = clamp01(merch_avg / 10000.0f);
+    fv[7]  = clamp01(km_home / 1000.0f);
+    fv[8]  = clamp01((float)tx_count_24h / 20.0f);
+    fv[9]  = is_online ? 1.0f : 0.0f;
+    fv[10] = card_present ? 1.0f : 0.0f;
+    fv[11] = known ? 0.0f : 1.0f;
+    fv[12] = mcc_risk(mcc);
+    fv[13] = clamp01(merch_avg / 10000.0f);
 
-    for (int i = 0; i < VDIM; i++) out[i] = round4(out[i]);
+    for (int i = 0; i < VDIM; i++) fv[i] = round4(fv[i]);
+
+    for (int i = 0; i < VDIM; i++) {
+        if ((i == 5 || i == 6) && fv[i] < 0.0f) {
+            out[i] = Q_SENTINEL;
+        } else {
+            out[i] = quant(fv[i]);
+        }
+    }
+    out[14] = 0;
+    out[15] = 0;
     return true;
 }
 
 
-__attribute__((target("avx2,fma")))
-static int knn_avx2(const float* vec) {
-    alignas(32) float q[VDIM_PADDED] = {0};
-    memcpy(q, vec, VDIM * sizeof(float));
+static inline void top_insert(int32_t* td, uint32_t* ti, int32_t d, uint32_t i) {
+    int j = KNN_K - 1;
+    while (j > 0 && td[j - 1] > d) {
+        td[j] = td[j - 1];
+        ti[j] = ti[j - 1];
+        j--;
+    }
+    td[j] = d;
+    ti[j] = i;
+}
 
-    const __m256 q0 = _mm256_load_ps(q + 0);
-    const __m256 q1 = _mm256_load_ps(q + 8);
+__attribute__((target("avx2")))
+static int knn_avx2(const int8_t* vec) {
+    const __m128i q8 = _mm_loadu_si128((const __m128i*)vec);
+    const __m256i q  = _mm256_cvtepi8_epi16(q8);
 
-    float   td[KNN_K];
-    uint8_t tl[KNN_K];
-    for (int i = 0; i < KNN_K; i++) { td[i] = INFINITY; tl[i] = 0; }
-    float threshold = INFINITY;
+    int32_t  td[KNN_K];
+    uint32_t ti[KNN_K];
+    for (int i = 0; i < KNN_K; i++) { td[i] = INT32_MAX; ti[i] = 0; }
+    int32_t threshold = INT32_MAX;
 
-    for (size_t i = 0; i < N_REFS; i++) {
-        const float* r = g_refs + i * VDIM_PADDED;
-        if (i + 8 < N_REFS) _mm_prefetch((const char*)(r + 8 * VDIM_PADDED), _MM_HINT_T0);
+    for (size_t i = 0; i < N_REFS; i += 2) {
+        if (i + 16 < N_REFS) _mm_prefetch((const char*)(g_refs + (i + 16) * VDIM_PADDED), _MM_HINT_T0);
 
-        __m256 r0 = _mm256_load_ps(r + 0);
-        __m256 r1 = _mm256_load_ps(r + 8);
-        __m256 d0 = _mm256_sub_ps(q0, r0);
-        __m256 d1 = _mm256_sub_ps(q1, r1);
-        __m256 sq = _mm256_fmadd_ps(d1, d1, _mm256_mul_ps(d0, d0));
+        __m128i r0_8 = _mm_load_si128((const __m128i*)(g_refs + (i + 0) * VDIM_PADDED));
+        __m128i r1_8 = _mm_load_si128((const __m128i*)(g_refs + (i + 1) * VDIM_PADDED));
+        __m256i r0 = _mm256_cvtepi8_epi16(r0_8);
+        __m256i r1 = _mm256_cvtepi8_epi16(r1_8);
+        __m256i d0 = _mm256_sub_epi16(q, r0);
+        __m256i d1 = _mm256_sub_epi16(q, r1);
+        __m256i sq0 = _mm256_madd_epi16(d0, d0);
+        __m256i sq1 = _mm256_madd_epi16(d1, d1);
 
-        __m128 lo = _mm256_castps256_ps128(sq);
-        __m128 hi = _mm256_extractf128_ps(sq, 1);
-        __m128 s  = _mm_add_ps(lo, hi);
-        s = _mm_hadd_ps(s, s);
-        s = _mm_hadd_ps(s, s);
-        const float d = _mm_cvtss_f32(s);
+        __m128i s0 = _mm_add_epi32(_mm256_castsi256_si128(sq0), _mm256_extracti128_si256(sq0, 1));
+        s0 = _mm_add_epi32(s0, _mm_srli_si128(s0, 8));
+        s0 = _mm_add_epi32(s0, _mm_srli_si128(s0, 4));
+        int32_t dist0 = _mm_cvtsi128_si32(s0);
 
-        if (d < threshold) {
-            int j = KNN_K - 1;
-            while (j > 0 && td[j - 1] > d) {
-                td[j] = td[j - 1];
-                tl[j] = tl[j - 1];
-                j--;
-            }
-            td[j] = d;
-            tl[j] = g_labels[i];
+        __m128i s1 = _mm_add_epi32(_mm256_castsi256_si128(sq1), _mm256_extracti128_si256(sq1, 1));
+        s1 = _mm_add_epi32(s1, _mm_srli_si128(s1, 8));
+        s1 = _mm_add_epi32(s1, _mm_srli_si128(s1, 4));
+        int32_t dist1 = _mm_cvtsi128_si32(s1);
+
+        if (dist0 < threshold) {
+            top_insert(td, ti, dist0, (uint32_t)(i + 0));
+            threshold = td[KNN_K - 1];
+        }
+        if (dist1 < threshold) {
+            top_insert(td, ti, dist1, (uint32_t)(i + 1));
             threshold = td[KNN_K - 1];
         }
     }
 
-    int fraud_n = 0;
-    for (int i = 0; i < KNN_K; i++) fraud_n += tl[i];
-    return fraud_n;
+    return g_labels[ti[0]] + g_labels[ti[1]] + g_labels[ti[2]] + g_labels[ti[3]] + g_labels[ti[4]];
 }
 
-static int knn_scalar(const float* vec) {
-    alignas(32) float q[VDIM_PADDED] = {0};
-    memcpy(q, vec, VDIM * sizeof(float));
-
-    float   td[KNN_K];
-    uint8_t tl[KNN_K];
-    for (int i = 0; i < KNN_K; i++) { td[i] = INFINITY; tl[i] = 0; }
-    float threshold = INFINITY;
+static int knn_scalar(const int8_t* vec) {
+    int32_t  td[KNN_K];
+    uint32_t ti[KNN_K];
+    for (int i = 0; i < KNN_K; i++) { td[i] = INT32_MAX; ti[i] = 0; }
+    int32_t threshold = INT32_MAX;
 
     for (size_t i = 0; i < N_REFS; i++) {
-        const float* r = g_refs + i * VDIM_PADDED;
-        float d = 0.0f;
-        for (int k = 0; k < VDIM_PADDED; k++) {
-            float diff = q[k] - r[k];
+        const int8_t* r = g_refs + i * VDIM_PADDED;
+        int32_t d = 0;
+        for (int k = 0; k < VDIM; k++) {
+            int32_t diff = (int32_t)vec[k] - (int32_t)r[k];
             d += diff * diff;
         }
         if (d < threshold) {
-            int j = KNN_K - 1;
-            while (j > 0 && td[j - 1] > d) {
-                td[j] = td[j - 1];
-                tl[j] = tl[j - 1];
-                j--;
-            }
-            td[j] = d;
-            tl[j] = g_labels[i];
+            top_insert(td, ti, d, (uint32_t)i);
             threshold = td[KNN_K - 1];
         }
     }
 
-    int fraud_n = 0;
-    for (int i = 0; i < KNN_K; i++) fraud_n += tl[i];
-    return fraud_n;
+    return g_labels[ti[0]] + g_labels[ti[1]] + g_labels[ti[2]] + g_labels[ti[3]] + g_labels[ti[4]];
 }
 
-typedef int (*knn_fn)(const float*);
+typedef int (*knn_fn)(const int8_t*);
 static knn_fn g_knn = nullptr;
 
 
@@ -547,7 +565,7 @@ static int try_process_one(Conn* c) {
         if (body_end > RBUF_SIZE) return -1;
         if (c->rp < body_end) return 0;
 
-        float vec[VDIM];
+        alignas(16) int8_t vec[VDIM_PADDED];
         const Resp* resp;
         if (!vectorize(c->rb + headers_end, content_len, vec)) {
             resp = &g_resp_400;
@@ -687,7 +705,7 @@ int main() {
     if (!refs_path)   refs_path   = DEFAULT_REFS_PATH;
     if (!labels_path) labels_path = DEFAULT_LABELS_PATH;
 
-    g_refs   = (const float*)  mmap_file(refs_path,   N_REFS * VDIM_PADDED * sizeof(float));
+    g_refs   = (const int8_t*) mmap_file(refs_path,   N_REFS * VDIM_PADDED);
     g_labels = (const uint8_t*)mmap_file(labels_path, N_REFS);
 
     __builtin_cpu_init();

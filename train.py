@@ -13,6 +13,7 @@ LABELS_PATH = BASE_DIR / 'labels.bin'
 VDIM = 14
 VDIM_PADDED = 16
 N_REFS = 100000
+SCALE = 127
 
 
 def load_dataset(path):
@@ -23,9 +24,16 @@ def load_dataset(path):
     return X, y
 
 
-def pad(X):
-    out = np.zeros((len(X), VDIM_PADDED), dtype=np.float32)
-    out[:, :VDIM] = X
+def quantize(X):
+    out = np.zeros((len(X), VDIM_PADDED), dtype=np.int8)
+    for j in range(VDIM):
+        col = X[:, j].astype(np.float32)
+        clipped = np.clip(col, 0.0, 1.0)
+        q = (clipped * SCALE + 0.5).astype(np.int32)
+        q = np.minimum(q, SCALE)
+        if j in (5, 6):
+            q = np.where(col < 0, -SCALE, q)
+        out[:, j] = q.astype(np.int8)
     return out
 
 
@@ -39,7 +47,7 @@ def main():
 
     print(f'  {len(X)} vetores | {y.sum()} fraudes | {(1 - y).sum()} legítimas')
 
-    REFS_PATH.write_bytes(pad(X).tobytes())
+    REFS_PATH.write_bytes(quantize(X).tobytes())
     LABELS_PATH.write_bytes(y.tobytes())
 
     print(f'  refs.bin   {REFS_PATH.stat().st_size / 1024 / 1024:6.2f} MB')
@@ -48,4 +56,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
