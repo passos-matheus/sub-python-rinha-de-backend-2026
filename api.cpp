@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <immintrin.h>
 
 
@@ -294,8 +296,21 @@ int main() {
     svr.set_keep_alive_max_count(10000);
     svr.set_keep_alive_timeout(30);
 
-    printf("Listening on port %d\n", PORT);
-    fflush(stdout);
-    svr.listen("0.0.0.0", PORT);
+    const char* sock_path = getenv("SOCKET_PATH");
+    if (sock_path && *sock_path) {
+        unlink(sock_path);
+        umask(0);
+        svr.set_address_family(AF_UNIX);
+        printf("Listening on unix:%s\n", sock_path);
+        fflush(stdout);
+        if (!svr.listen(sock_path, 1)) {
+            fprintf(stderr, "listen failed on %s: %s\n", sock_path, strerror(errno));
+            return 1;
+        }
+    } else {
+        printf("Listening on port %d\n", PORT);
+        fflush(stdout);
+        svr.listen("0.0.0.0", PORT);
+    }
     return 0;
 }

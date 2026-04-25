@@ -1,0 +1,36 @@
+services:
+  api1: &api
+    image: passosmatheus/sub-rinha-2026:knn-unix
+    environment:
+      SOCKET_PATH: /sockets/api1.sock
+    volumes:
+      - sockets:/sockets
+    deploy:
+      resources:
+        limits:
+          cpus: "0.4"
+          memory: "140M"
+
+  api2:
+    <<: *api
+    environment:
+      SOCKET_PATH: /sockets/api2.sock
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - sockets:/sockets
+    depends_on:
+      - api1
+      - api2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: "20M"
+
+volumes:
+  sockets:
