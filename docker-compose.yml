@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: passosmatheus/sub-rinha-2026:knn-int16
+    image: passosmatheus/sub-rinha-2026:knn-rerank
     environment:
       SOCKET_PATH: /sockets/api1.sock
     volumes:
